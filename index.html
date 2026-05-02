@@ -607,16 +607,19 @@ async function openStokSecModal(ieId) {
           <input class="search-input" style="padding-left:34px" placeholder="Parça ara..." oninput="stokSecFiltrele(this.value)"/>
         </div>
         <div id="stok-sec-liste" style="max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm)">
-          ${(stoklar||[]).length===0?'<p style="text-align:center;padding:2rem;color:var(--text2)">Stokta ürün yok</p>':
-          (stoklar||[]).map(s=>`
-            <div class="stok-sec-row" data-ad="${s.ad.toLowerCase()}" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #f3f4f6;transition:background .15s" onmouseover="this.style.background='#f9fafb'" onmouseout="this.style.background=''">
+          ${(stoklar||[]).length===0
+            ? '<p style="text-align:center;padding:2rem;color:var(--text2)">Stokta ürün yok</p>'
+            : (stoklar||[]).map((s, i) => `
+            <div class="stok-sec-row" data-idx="${i}" data-ad="${(s.ad||'').toLowerCase()}" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #f3f4f6;">
               <div>
                 <div style="font-weight:600;font-size:13px">${s.ad}</div>
-                <div style="font-size:10px;color:var(--text2);margin-top:2px">${s.kat} · Stok: <strong style="color:${s.miktar<=s.kritik?'var(--danger)':'var(--success)'}">${s.miktar} ${s.birim}</strong> · Satış: ${fmt(s.satis)} ₺</div>
+                <div style="font-size:10px;color:var(--text2);margin-top:2px">${s.kat||''} · Stok: <strong style="color:${s.miktar<=s.kritik?'var(--danger)':'var(--success)'}">${s.miktar} ${s.birim}</strong> · Satış: ${fmt(s.satis)} ₺</div>
               </div>
               <div style="display:flex;gap:6px;align-items:center">
-                <input type="number" id="adet-${s.kod}" min="1" max="${s.miktar}" value="1" style="width:56px;padding:5px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:12px;text-align:center"/>
-                <button class="btn btn-success btn-sm" onclick="parcaEkle('${ieId}','${s.kod}','${s.ad.replace(/'/g,"\\'")}',${s.satis},${s.miktar})">Ekle</button>
+                <input type="number" class="parca-adet" data-idx="${i}" min="1" max="${s.miktar}" value="1"
+                  style="width:60px;padding:5px 8px;border:1.5px solid var(--border);border-radius:6px;font-size:12px;text-align:center"/>
+                <button class="btn btn-success btn-sm"
+                  onclick="parcaEkleIdx('${ieId}',${i})">Ekle</button>
               </div>
             </div>`).join('')}
         </div>
@@ -625,45 +628,65 @@ async function openStokSecModal(ieId) {
         </div>
       </div>
     </div>`;
+
+  // Stok listesini global değişkende sakla
+  window._stokSecList = stoklar || [];
 }
 
 function stokSecFiltrele(q) {
   document.querySelectorAll('.stok-sec-row').forEach(row => {
-    row.style.display = row.dataset.ad.includes(q.toLowerCase()) ? '' : 'none';
+    row.style.display = (row.dataset.ad || '').includes(q.toLowerCase()) ? '' : 'none';
   });
 }
 
-async function parcaEkle(ieId, stokKod, stokAd, fiyat, mevcut) {
-  const adetEl = document.getElementById('adet-' + stokKod);
-  const adet = parseInt(adetEl?.value) || 1;
+async function parcaEkleIdx(ieId, idx) {
+  const s = window._stokSecList[idx];
+  if (!s) { toast('Ürün bulunamadı!', 'error'); return; }
+
+  // Adet inputunu bul
+  const adetInput = document.querySelector(`.parca-adet[data-idx="${idx}"]`);
+  const adet = parseInt(adetInput?.value) || 1;
+
   if (adet <= 0) { toast('Adet 0 olamaz!', 'error'); return; }
-  if (adet > mevcut) { toast('Stok yetersiz! Mevcut: ' + mevcut, 'error'); return; }
+  if (adet > s.miktar) { toast('Stok yetersiz! Mevcut: ' + s.miktar, 'error'); return; }
 
   // Mevcut parçaları getir
   const { data: ie } = await supa.from('is_emri').select('parcalar').eq('id', ieId).single();
   const parcalar = getParcalar(ie);
 
   // Aynı parça varsa adedi artır
-  const mevcut_parca = parcalar.find(p => p.kod === stokKod);
-  if (mevcut_parca) {
-    mevcut_parca.adet += adet;
+  const mevcutParca = parcalar.find(p => p.kod === s.kod);
+  if (mevcutParca) {
+    mevcutParca.adet += adet;
   } else {
-    parcalar.push({ kod: stokKod, ad: stokAd, adet, fiyat });
+    parcalar.push({ kod: s.kod, ad: s.ad, adet, fiyat: s.satis });
   }
 
   // İş emrini güncelle
   const { error: e1 } = await supa.from('is_emri').update({ parcalar: JSON.stringify(parcalar) }).eq('id', ieId);
   if (e1) { toast('Hata: ' + e1.message, 'error'); return; }
 
-  // Stok düş
-  const { error: e2 } = await supa.from('stok').update({ miktar: mevcut - adet }).eq('kod', stokKod);
+  // Stoğu düş
+  const { error: e2 } = await supa.from('stok').update({ miktar: s.miktar - adet }).eq('kod', s.kod);
   if (e2) { toast('Stok güncellenemedi!', 'error'); return; }
 
-  // Stok hareketi kaydet
-  await supa.from('stok_hareket').insert({ tarih: today(), kod: stokKod, ad: stokAd, tip: 'cikis', adet, aciklama: ieId + ' - İş emri' });
+  // Stok hareketi
+  await supa.from('stok_hareket').insert({ tarih: today(), kod: s.kod, ad: s.ad, tip: 'cikis', adet, aciklama: ieId + ' - İş emri' });
 
-  toast(`${stokAd} (${adet} adet) eklendi ✓`);
-  openIEDetail(ieId);
+  // Listede stoğu güncelle
+  window._stokSecList[idx].miktar -= adet;
+
+  toast(s.ad + ' (' + adet + ' adet) eklendi ✓');
+
+  // Adet inputunu sıfırla, stok sayısını güncelle
+  if (adetInput) adetInput.value = 1;
+  if (adetInput) adetInput.max = window._stokSecList[idx].miktar;
+
+  // Eğer stok bitti ise satırı gizle
+  if (window._stokSecList[idx].miktar <= 0) {
+    const row = document.querySelector(`.stok-sec-row[data-idx="${idx}"]`);
+    if (row) row.style.display = 'none';
+  }
 }
 
 async function parcaSil(ieId, index) {
